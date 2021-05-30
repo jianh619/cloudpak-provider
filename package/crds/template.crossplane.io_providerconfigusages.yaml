@@ -11,7 +11,7 @@ spec:
     categories:
     - crossplane
     - provider
-    - PROVIDER-NAME
+    - cloudpak
     kind: ProviderConfigUsage
     listKind: ProviderConfigUsageList
     plural: providerconfigusages

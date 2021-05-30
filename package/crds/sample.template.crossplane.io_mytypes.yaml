@@ -11,7 +11,7 @@ spec:
     categories:
     - crossplane
     - managed
-    - PROVIDER-NAME
+    - cloudpak
     kind: MyType
     listKind: MyTypeList
     plural: mytypes
@@ -24,9 +24,6 @@ spec:
       type: string
     - jsonPath: .status.atProvider.state
       name: STATE
-      type: string
-    - jsonPath: .spec.classRef.name
-      name: CLASS
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: AGE
