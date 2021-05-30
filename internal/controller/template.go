@@ -22,8 +22,8 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
 
-	"github.com/crossplane/provider-template/internal/controller/config"
-	"github.com/crossplane/provider-template/internal/controller/mytype"
+	"github.com/jianh619/cloudpak-provider/internal/controller/config"
+	"github.com/jianh619/cloudpak-provider/internal/controller/mytype"
 )
 
 // Setup creates all Template controllers with the supplied logger and adds them to
@@ -39,3 +39,4 @@ func Setup(mgr ctrl.Manager, l logging.Logger, wl workqueue.RateLimiter) error {
 	}
 	return nil
 }
+

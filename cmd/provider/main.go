@@ -27,8 +27,8 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/ratelimiter"
 
-	"github.com/crossplane/provider-template/apis"
-	"github.com/crossplane/provider-template/internal/controller"
+	"github.com/jianh619/cloudpak-provider/apis"
+	"github.com/jianh619/cloudpak-provider/internal/controller"
 )
 
 func main() {
@@ -66,3 +66,4 @@ func main() {
 	kingpin.FatalIfError(controller.Setup(mgr, log, rl), "Cannot setup Template controllers")
 	kingpin.FatalIfError(mgr.Start(ctrl.SetupSignalHandler()), "Cannot start controller manager")
 }
+
