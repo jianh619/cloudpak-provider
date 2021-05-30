@@ -25,7 +25,7 @@ import (
 // A ProviderConfigSpec defines the desired state of a ProviderConfig.
 type ProviderConfigSpec struct {
 	// Credentials required to authenticate to this provider.
-	Kubeconfig ProviderCredentials `json:"kubeconfig"`
+	Credentials ProviderCredentials `json:"credentials"`
 }
 
 // ProviderCredentials required to authenticate.
