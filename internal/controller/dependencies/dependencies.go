@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package dependencies 
+package dependencies
 
 import (
 	"context"
@@ -42,6 +42,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+
+	operatorclient "github.com/operator-framework/operator-lifecycle-manager/pkg/api/client/clientset/versioned"
 )
 
 const (
@@ -119,13 +121,20 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 
 	clientConfig, err := clientcmd.RESTConfigFromKubeConfig(data)
 
-	clientset, err := kubernetes.NewForConfig(clientConfig)
+	kubeClient, err := kubernetes.NewForConfig(clientConfig)
 	if err != nil {
 		panic(err)
 	}
+
+	opClientInstance, err := operatorclient.NewForConfig(clientConfig)
+	if err != nil {
+		panic(err)
+	}
+
 	return &external{
 		localKube: c.kube,
-		kube:      clientset,
+		kube:      kubeClient,
+		opClient:  opClientInstance,
 	}, nil
 }
 
@@ -136,6 +145,7 @@ type external struct {
 	// would be something like an AWS SDK client.
 	localKube client.Client
 	kube      *kubernetes.Clientset
+	opClient  *operatorclient.Clientset
 }
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -146,11 +156,10 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 
 	// These fmt statements should be removed in the real implementation.
 	fmt.Printf("Observing: %+v", cr)
-	fmt.Printf("Listing deployments in namespace %q:\n", apiv1.NamespaceDefault)
-	deploymentsClient := e.kube.AppsV1().Deployments(apiv1.NamespaceDefault)
-	_, err := deploymentsClient.Get(context.TODO(), "demo-deployment", metav1.GetOptions{})
+
+	err := e.observeTest()
 	if err != nil {
-		fmt.Printf("Failed to get the kube resources ", cr)
+		fmt.Printf("Failed to deploy test kube resources ", cr)
 		return managed.ExternalObservation{
 			ResourceExists: false,
 		}, nil
@@ -171,22 +180,6 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		// resource. These will be stored as the connection secret.
 		ConnectionDetails: managed.ConnectionDetails{},
 	}, nil
-
-	return managed.ExternalObservation{
-		// Return false when the external resource does not exist. This lets
-		// the managed resource reconciler know that it needs to call Create to
-		// (re)create the resource, or that it has successfully been deleted.
-		ResourceExists: false,
-
-		// Return false when the external resource exists, but it not up to date
-		// with the desired managed resource state. This lets the managed
-		// resource reconciler know that it needs to call Update.
-		ResourceUpToDate: true,
-
-		// Return any details that may be required to connect to the external
-		// resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
-	}, nil
 }
 
 func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
@@ -196,7 +189,50 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	}
 
 	fmt.Printf("Creating: %+v", cr)
+	e.createTest()
+	return managed.ExternalCreation{
+		// Optionally return any details that may be required to connect to the
+		// external resource. These will be stored as the connection secret.
+		ConnectionDetails: managed.ConnectionDetails{},
+	}, nil
+}
 
+func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
+	cr, ok := mg.(*v1alpha1.Dependency)
+	if !ok {
+		return managed.ExternalUpdate{}, errors.New(errNotDependency)
+	}
+
+	fmt.Printf("Updating: %+v", cr)
+
+	return managed.ExternalUpdate{
+		// Optionally return any details that may be required to connect to the
+		// external resource. These will be stored as the connection secret.
+		ConnectionDetails: managed.ConnectionDetails{},
+	}, nil
+}
+
+func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
+	cr, ok := mg.(*v1alpha1.Dependency)
+	if !ok {
+		return errors.New(errNotDependency)
+	}
+
+	fmt.Printf("Deleting: %+v", cr)
+
+	return nil
+}
+
+func int32Ptr(i int32) *int32 { return &i }
+
+func (e *external) observeTest() error {
+	fmt.Printf("Listing deployments in namespace %q:\n", apiv1.NamespaceDefault)
+	deploymentsClient := e.kube.AppsV1().Deployments(apiv1.NamespaceDefault)
+	_, err := deploymentsClient.Get(context.TODO(), "demo-deployment", metav1.GetOptions{})
+	return err
+}
+
+func (e *external) createTest() error {
 	deploymentsClient := e.kube.AppsV1().Deployments(apiv1.NamespaceDefault)
 
 	deployment := &appsv1.Deployment{
@@ -241,38 +277,6 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		panic(err)
 	}
 	fmt.Printf("Created deployment %q.\n", result.GetObjectMeta().GetName())
-	return managed.ExternalCreation{
-		// Optionally return any details that may be required to connect to the
-		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
-	}, nil
+	return err
 }
-
-func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
-	cr, ok := mg.(*v1alpha1.Dependency)
-	if !ok {
-		return managed.ExternalUpdate{}, errors.New(errNotDependency)
-	}
-
-	fmt.Printf("Updating: %+v", cr)
-
-	return managed.ExternalUpdate{
-		// Optionally return any details that may be required to connect to the
-		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
-	}, nil
-}
-
-func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
-	cr, ok := mg.(*v1alpha1.Dependency)
-	if !ok {
-		return errors.New(errNotDependency)
-	}
-
-	fmt.Printf("Deleting: %+v", cr)
-
-	return nil
-}
-
-func int32Ptr(i int32) *int32 { return &i }
 
