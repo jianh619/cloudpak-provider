@@ -39,6 +39,8 @@ import (
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -52,7 +54,8 @@ const (
 	errGetPC         = "cannot get ProviderConfig"
 	errGetCreds      = "cannot get credentials"
 
-	errNewClient = "cannot create new Service"
+	errNewClient   = "cannot create new Service"
+	aiopsNamespace = "aiops"
 )
 
 // A NoOpService does nothing.
@@ -132,9 +135,10 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	}
 
 	return &external{
-		localKube: c.kube,
-		kube:      kubeClient,
-		opClient:  opClientInstance,
+		localKube:  c.kube,
+		kube:       kubeClient,
+		opClient:   opClientInstance,
+		dependency: "Namespace",
 	}, nil
 }
 
@@ -143,9 +147,10 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 type external struct {
 	// A 'client' used to connect to the external resource API. In practice this
 	// would be something like an AWS SDK client.
-	localKube client.Client
-	kube      *kubernetes.Clientset
-	opClient  *operatorclient.Clientset
+	localKube  client.Client
+	kube       *kubernetes.Clientset
+	opClient   *operatorclient.Clientset
+	dependency string
 }
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -157,7 +162,11 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	// These fmt statements should be removed in the real implementation.
 	fmt.Printf("Observing: %+v", cr)
 
-	err := e.observeTest()
+	//this is for test
+	//err := e.observeTest()
+
+	//this is for real deployment
+	err := e.observeDependencies(ctx)
 	if err != nil {
 		fmt.Printf("Failed to deploy test kube resources ", cr)
 		return managed.ExternalObservation{
@@ -189,7 +198,12 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	}
 
 	fmt.Printf("Creating: %+v", cr)
-	e.createTest()
+
+	//this is for test
+	//e.createTest()
+
+	//this is for real deployment
+	e.createDependencies(ctx)
 	return managed.ExternalCreation{
 		// Optionally return any details that may be required to connect to the
 		// external resource. These will be stored as the connection secret.
@@ -225,11 +239,39 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 func int32Ptr(i int32) *int32 { return &i }
 
+func (e *external) observeDependencies(ctx context.Context) error {
+
+	fmt.Printf("Observe Namespace existing for aiops %q:\n", aiopsNamespace)
+
+	_, err := e.kube.CoreV1().Namespaces().Get(context.TODO(), aiopsNamespace, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (e *external) observeTest() error {
 	fmt.Printf("Listing deployments in namespace %q:\n", apiv1.NamespaceDefault)
 	deploymentsClient := e.kube.AppsV1().Deployments(apiv1.NamespaceDefault)
 	_, err := deploymentsClient.Get(context.TODO(), "demo-deployment", metav1.GetOptions{})
 	return err
+}
+
+func (e *external) createDependencies(ctx context.Context) error {
+	fmt.Printf("Creating Namespace for aiops %q:\n", aiopsNamespace)
+	namespaceSource := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: aiopsNamespace,
+		},
+	}
+	namespaceobj, err := e.kube.CoreV1().Namespaces().Create(context.TODO(), namespaceSource, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		fmt.Errorf("create namespace error , namespace : ", aiopsNamespace)
+		return err
+	}
+	fmt.Printf("namespace created", "name", namespaceobj.Name)
+	return nil
 }
 
 func (e *external) createTest() error {
