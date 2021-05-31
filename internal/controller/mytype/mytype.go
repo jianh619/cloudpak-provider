@@ -35,6 +35,13 @@ import (
 
 	"github.com/jianh619/cloudpak-provider/apis/dependency/v1alpha1"
 	apisv1alpha1 "github.com/jianh619/cloudpak-provider/apis/v1alpha1"
+
+	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	apiv1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -64,9 +71,9 @@ func Setup(mgr ctrl.Manager, l logging.Logger, rl workqueue.RateLimiter) error {
 	r := managed.NewReconciler(mgr,
 		resource.ManagedKind(v1alpha1.DependencyGroupVersionKind),
 		managed.WithExternalConnecter(&connector{
-			kube:         mgr.GetClient(),
-			usage:        resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
-			newServiceFn: newNoOpService}),
+			kube:  mgr.GetClient(),
+			usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
+		}),
 		managed.WithLogger(l.WithValues("controller", name)),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))))
 
@@ -80,9 +87,8 @@ func Setup(mgr ctrl.Manager, l logging.Logger, rl workqueue.RateLimiter) error {
 // A connector is expected to produce an ExternalClient when its Connect method
 // is called.
 type connector struct {
-	kube         client.Client
-	usage        resource.Tracker
-	newServiceFn func(creds []byte) (interface{}, error)
+	kube  client.Client
+	usage resource.Tracker
 }
 
 // Connect typically produces an ExternalClient by:
@@ -111,12 +117,16 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		return nil, errors.Wrap(err, errGetCreds)
 	}
 
-	svc, err := c.newServiceFn(data)
-	if err != nil {
-		return nil, errors.Wrap(err, errNewClient)
-	}
+	clientConfig, err := clientcmd.RESTConfigFromKubeConfig(data)
 
-	return &external{service: svc}, nil
+	clientset, err := kubernetes.NewForConfig(clientConfig)
+	if err != nil {
+		panic(err)
+	}
+	return &external{
+		localKube: c.kube,
+		kube:      clientset,
+	}, nil
 }
 
 // An ExternalClient observes, then either creates, updates, or deletes an
@@ -124,10 +134,11 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 type external struct {
 	// A 'client' used to connect to the external resource API. In practice this
 	// would be something like an AWS SDK client.
-	service interface{}
+	localKube client.Client
+	kube      *kubernetes.Clientset
 }
 
-func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
+func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
 	cr, ok := mg.(*v1alpha1.Dependency)
 	if !ok {
 		return managed.ExternalObservation{}, errors.New(errNotDependency)
@@ -135,7 +146,16 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 
 	// These fmt statements should be removed in the real implementation.
 	fmt.Printf("Observing: %+v", cr)
-
+	fmt.Printf("Listing deployments in namespace %q:\n", apiv1.NamespaceDefault)
+	deploymentsClient := e.kube.AppsV1().Deployments(apiv1.NamespaceDefault)
+	_, err := deploymentsClient.Get(context.TODO(), "demo-deployment", metav1.GetOptions{})
+	if err != nil {
+		fmt.Printf("Failed to get the kube resources ", cr)
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+	cr.Status.SetConditions(xpv1.Available())
 	return managed.ExternalObservation{
 		// Return false when the external resource does not exist. This lets
 		// the managed resource reconciler know that it needs to call Create to
@@ -151,9 +171,25 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		// resource. These will be stored as the connection secret.
 		ConnectionDetails: managed.ConnectionDetails{},
 	}, nil
+
+	return managed.ExternalObservation{
+		// Return false when the external resource does not exist. This lets
+		// the managed resource reconciler know that it needs to call Create to
+		// (re)create the resource, or that it has successfully been deleted.
+		ResourceExists: false,
+
+		// Return false when the external resource exists, but it not up to date
+		// with the desired managed resource state. This lets the managed
+		// resource reconciler know that it needs to call Update.
+		ResourceUpToDate: true,
+
+		// Return any details that may be required to connect to the external
+		// resource. These will be stored as the connection secret.
+		ConnectionDetails: managed.ConnectionDetails{},
+	}, nil
 }
 
-func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
+func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
 	cr, ok := mg.(*v1alpha1.Dependency)
 	if !ok {
 		return managed.ExternalCreation{}, errors.New(errNotDependency)
@@ -161,6 +197,50 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 
 	fmt.Printf("Creating: %+v", cr)
 
+	deploymentsClient := e.kube.AppsV1().Deployments(apiv1.NamespaceDefault)
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "demo-deployment",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(2),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "demo",
+				},
+			},
+			Template: apiv1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "demo",
+					},
+				},
+				Spec: apiv1.PodSpec{
+					Containers: []apiv1.Container{
+						{
+							Name:  "web",
+							Image: "nginx:1.12",
+							Ports: []apiv1.ContainerPort{
+								{
+									Name:          "http",
+									Protocol:      apiv1.ProtocolTCP,
+									ContainerPort: 80,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	// Create Deployment
+	fmt.Println("Creating deployment...")
+	result, err := deploymentsClient.Create(context.TODO(), deployment, metav1.CreateOptions{})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Created deployment %q.\n", result.GetObjectMeta().GetName())
 	return managed.ExternalCreation{
 		// Optionally return any details that may be required to connect to the
 		// external resource. These will be stored as the connection secret.
@@ -193,3 +273,6 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 	return nil
 }
+
+func int32Ptr(i int32) *int32 { return &i }
+

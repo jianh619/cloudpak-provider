@@ -1,7 +1,7 @@
-apiVersion: sample.template.crossplane.io/v1alpha1
-kind: MyType
+apiVersion: aiops.crossplane.io/v1alpha1
+kind: Dependency
 metadata:
-  name: example
+  name: dependency-test
 spec:
   forProvider:
     configurableField: test
