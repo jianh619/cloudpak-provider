@@ -70,8 +70,12 @@ const (
 	DOpenshiftOperatorNS    = "openshift-operators"
 	DServerlessOperator     = "ServerlessOperator"
 	DServerlessOperatorName = "serverless-operator"
+	DServerlessNamespace    = "ServerlessNamespace"
 	DKnativeServingInstance = "KnativeServingInstance"
 	DKnativeEveningInstance = "KnativeEveningInstance"
+
+	KNATIVE_SERVING_NAMESPACE  = "knative-serving"
+	KNATIVE_EVENTING_NAMESPACE = "knative-eventing"
 )
 
 // A NoOpService does nothing.
@@ -219,6 +223,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		err = e.observeStrimzOperator(ctx)
 	case dependency == DServerlessOperator:
 		err = e.observeServerlessOperator(ctx)
+	case dependency == DServerlessNamespace:
+		err = e.observeServerlessNamespace(ctx)
 	}
 
 	//this is for real deployment
@@ -268,6 +274,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.createStrimzOperator(ctx)
 	case dependency == DServerlessOperator:
 		e.createServerlessOperator(ctx)
+	case dependency == DServerlessNamespace:
+		e.createServerlessNamespace(ctx)
 	}
 
 	return managed.ExternalCreation{
@@ -482,7 +490,7 @@ func (e *external) observeServerlessOperator(ctx context.Context) error {
 		dependency = DServerlessOperator
 		return nil
 	}
-	dependency = DNamespace
+	dependency = DServerlessNamespace
 	return nil
 }
 
@@ -510,6 +518,54 @@ func (e *external) createServerlessOperator(ctx context.Context) error {
 		return err
 	}
 	e.logger.Info("StrimzOperator subscription created " + opServerless.Name)
+	return nil
+}
+
+func (e *external) observeServerlessNamespace(ctx context.Context) error {
+
+	e.logger.Info("Observe ServerlessNamespace existing for aiops " + KNATIVE_SERVING_NAMESPACE)
+
+	_, err := e.kube.CoreV1().Namespaces().Get(context.TODO(), KNATIVE_SERVING_NAMESPACE, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	e.logger.Info("Observe ServerlessNamespace existing for aiops " + KNATIVE_EVENTING_NAMESPACE)
+	_, err = e.kube.CoreV1().Namespaces().Get(context.TODO(), KNATIVE_EVENTING_NAMESPACE, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	dependency = DNamespace
+	return nil
+}
+
+func (e *external) createServerlessNamespace(ctx context.Context) error {
+	e.logger.Info("Creating Namespace for aiops " + KNATIVE_SERVING_NAMESPACE)
+	namespaceSource := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: KNATIVE_SERVING_NAMESPACE,
+		},
+	}
+	namespaceobj, err := e.kube.CoreV1().Namespaces().Create(context.TODO(), namespaceSource, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		e.logger.Info("create namespace error , namespace : " + namespaceobj.Name)
+		return err
+	}
+
+	e.logger.Info("Creating Namespace for aiops " + KNATIVE_EVENTING_NAMESPACE)
+	namespaceSource = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: KNATIVE_EVENTING_NAMESPACE,
+		},
+	}
+	namespaceobj, err = e.kube.CoreV1().Namespaces().Create(context.TODO(), namespaceSource, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		e.logger.Info("create namespace error , namespace : " + namespaceobj.Name)
+		return err
+	}
+
+	e.logger.Info("Knative namespaces created ")
 	return nil
 }
 
