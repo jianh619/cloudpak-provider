@@ -67,8 +67,9 @@ const (
 	DImagePullSecretName    = "ibm-entitlement-key"
 	DStrimzOperator         = "StrimzOperator"
 	DStrimzOperatorName     = "strimzi-kafka-operator"
-	DStrimzOperatorNS       = "openshift-operators"
+	DOpenshiftOperatorNS    = "openshift-operators"
 	DServerlessOperator     = "ServerlessOperator"
+	DServerlessOperatorName = "serverless-operator"
 	DKnativeServingInstance = "KnativeServingInstance"
 	DKnativeEveningInstance = "KnativeEveningInstance"
 )
@@ -216,6 +217,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		err = e.observeImagePullSecret(ctx)
 	case dependency == DStrimzOperator:
 		err = e.observeStrimzOperator(ctx)
+	case dependency == DServerlessOperator:
+		err = e.observeServerlessOperator(ctx)
 	}
 
 	//this is for real deployment
@@ -263,7 +266,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.createImagePullSecret(ctx)
 	case dependency == DStrimzOperator:
 		e.createStrimzOperator(ctx)
-
+	case dependency == DServerlessOperator:
+		e.createServerlessOperator(ctx)
 	}
 
 	return managed.ExternalCreation{
@@ -392,7 +396,7 @@ func (e *external) observeImagePullSecret(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	dependency = DStrimzOperator 
+	dependency = DStrimzOperator
 	return nil
 }
 
@@ -421,7 +425,7 @@ func (e *external) observeStrimzOperator(ctx context.Context) error {
 	e.logger.Info("Observe StrimzOperator existing for aiops ")
 
 	opaiops, err := e.opClient.OperatorsV1alpha1().
-		Subscriptions(DStrimzOperatorNS).
+		Subscriptions(DOpenshiftOperatorNS).
 		Get(ctx, DStrimzOperatorName, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -432,7 +436,7 @@ func (e *external) observeStrimzOperator(ctx context.Context) error {
 		dependency = DStrimzOperator
 		return nil
 	}
-	dependency = DNamespace
+	dependency = DServerlessOperator
 	return nil
 }
 
@@ -440,7 +444,7 @@ func (e *external) createStrimzOperator(ctx context.Context) error {
 	e.logger.Info("Creating StrimzOperator for aiops ")
 	subscription := &operatorv1alpha1.Subscription{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: DStrimzOperatorNS,
+			Namespace: DOpenshiftOperatorNS,
 			Name:      DStrimzOperatorName,
 		},
 		Spec: &operatorv1alpha1.SubscriptionSpec{
@@ -459,6 +463,53 @@ func (e *external) createStrimzOperator(ctx context.Context) error {
 		return err
 	}
 	e.logger.Info("StrimzOperator subscription created " + opStrimzi.Name)
+	return nil
+}
+
+func (e *external) observeServerlessOperator(ctx context.Context) error {
+
+	e.logger.Info("Observe ServerlessOperator existing for aiops ")
+
+	opaiops, err := e.opClient.OperatorsV1alpha1().
+		Subscriptions(DOpenshiftOperatorNS).
+		Get(ctx, DServerlessOperatorName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if !(opaiops.Status.State == "AtLatestKnown") {
+		//Return reconcile waiting for StrimzOperator ready
+		e.logger.Info("Waiting for Serverless Operator AtLatestKnown")
+		dependency = DServerlessOperator
+		return nil
+	}
+	dependency = DNamespace
+	return nil
+}
+
+func (e *external) createServerlessOperator(ctx context.Context) error {
+	e.logger.Info("Creating ServerlessOperator for aiops ")
+
+	subscription := &operatorv1alpha1.Subscription{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: DOpenshiftOperatorNS,
+			Name:      DServerlessOperatorName,
+		},
+		Spec: &operatorv1alpha1.SubscriptionSpec{
+			Channel:                "4.6",
+			InstallPlanApproval:    operatorv1alpha1.ApprovalAutomatic,
+			CatalogSource:          "redhat-operators",
+			CatalogSourceNamespace: "openshift-marketplace",
+			Package:                "serverless-operator",
+		},
+	}
+	opServerless, err := e.opClient.OperatorsV1alpha1().
+		Subscriptions(DOpenshiftOperatorNS).
+		Create(ctx, subscription, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	e.logger.Info("StrimzOperator subscription created " + opServerless.Name)
 	return nil
 }
 
