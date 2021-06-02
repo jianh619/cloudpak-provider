@@ -37,25 +37,34 @@ import (
 	apisv1alpha1 "github.com/jianh619/cloudpak-provider/apis/v1alpha1"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	openshiftv1alpha1 "github.com/openshift/api/operator/v1alpha1"
+	ocpoperatorv1alpha1Client "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	operatorclient "github.com/operator-framework/operator-lifecycle-manager/pkg/api/client/clientset/versioned"
 )
 
 const (
-	errNotDependency = "managed resource is not a Dependency custom resource"
-	errTrackPCUsage  = "cannot track ProviderConfig usage"
-	errGetPC         = "cannot get ProviderConfig"
-	errGetCreds      = "cannot get credentials"
+	errNotDependency     = "managed resource is not a Dependency custom resource"
+	errTrackPCUsage      = "cannot track ProviderConfig usage"
+	errGetPC             = "cannot get ProviderConfig"
+	errGetCreds          = "cannot get credentials"
+	errObserveDependency = "observe dependencies error"
+	errCreateDependency  = "create dependencies error"
 
 	errNewClient   = "cannot create new Service"
 	aiopsNamespace = "aiops"
+
+	DNamespace              = "Namespace"
+	DImageContentPolicy     = "ImageContentPolicy"
+	DImageContentPolicyName = "mirror-config"
 )
 
 // A NoOpService does nothing.
@@ -63,11 +72,20 @@ type NoOpService struct{}
 
 var (
 	newNoOpService = func(_ []byte) (interface{}, error) { return &NoOpService{}, nil }
+
+	registries = map[string][]string{
+		"cp.icr.io/cp":        {"cp.stg.icr.io/cp"},
+		"docker.io/ibmcom":    {"cp.stg.icr.io/cp"},
+		"quay.io/opencloudio": {"hyc-cloud-private-daily-docker-local.artifactory.swg-devops.com/ibmcom"},
+		"cp.icr.io/cp/cpd":    {"hyc-cloud-private-daily-docker-local.artifactory.swg-devops.com/ibmcom"},
+	}
+	dependency = ""
 )
 
 // Setup adds a controller that reconciles Dependency managed resources.
 func Setup(mgr ctrl.Manager, l logging.Logger, rl workqueue.RateLimiter) error {
 	name := managed.ControllerName(v1alpha1.DependencyGroupKind)
+	logger := l.WithValues("controller", name)
 
 	o := controller.Options{
 		RateLimiter: ratelimiter.NewDefaultManagedRateLimiter(rl),
@@ -76,8 +94,9 @@ func Setup(mgr ctrl.Manager, l logging.Logger, rl workqueue.RateLimiter) error {
 	r := managed.NewReconciler(mgr,
 		resource.ManagedKind(v1alpha1.DependencyGroupVersionKind),
 		managed.WithExternalConnecter(&connector{
-			kube:  mgr.GetClient(),
-			usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
+			logger: logger,
+			kube:   mgr.GetClient(),
+			usage:  resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
 		}),
 		managed.WithLogger(l.WithValues("controller", name)),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))))
@@ -92,8 +111,9 @@ func Setup(mgr ctrl.Manager, l logging.Logger, rl workqueue.RateLimiter) error {
 // A connector is expected to produce an ExternalClient when its Connect method
 // is called.
 type connector struct {
-	kube  client.Client
-	usage resource.Tracker
+	logger logging.Logger
+	kube   client.Client
+	usage  resource.Tracker
 }
 
 // Connect typically produces an ExternalClient by:
@@ -106,6 +126,10 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	if !ok {
 		return nil, errors.New(errNotDependency)
 	}
+
+	logger := c.logger.WithValues("request", cr.Name)
+
+	logger.Info("Connecting")
 
 	if err := c.usage.Track(ctx, mg); err != nil {
 		return nil, errors.Wrap(err, errTrackPCUsage)
@@ -135,22 +159,22 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	}
 
 	return &external{
-		localKube:  c.kube,
-		kube:       kubeClient,
-		opClient:   opClientInstance,
-		dependency: "Namespace",
+		logger:    logger,
+		localKube: c.kube,
+		kube:      kubeClient,
+		config:    clientConfig,
+		opClient:  opClientInstance,
 	}, nil
 }
 
 // An ExternalClient observes, then either creates, updates, or deletes an
 // external resource to ensure it reflects the managed resource's desired state.
 type external struct {
-	// A 'client' used to connect to the external resource API. In practice this
-	// would be something like an AWS SDK client.
-	localKube  client.Client
-	kube       *kubernetes.Clientset
-	opClient   *operatorclient.Clientset
-	dependency string
+	logger    logging.Logger
+	localKube client.Client
+	kube      *kubernetes.Clientset
+	config    *rest.Config
+	opClient  *operatorclient.Clientset
 }
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -160,15 +184,26 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 
 	// These fmt statements should be removed in the real implementation.
-	fmt.Printf("Observing: %+v", cr)
+	e.logger.Info("Observing: " + cr.ObjectMeta.Name)
 
 	//this is for test
 	//err := e.observeTest()
 
+	err := errors.New("This is just for init ")
+
+	if dependency == "" {
+		dependency = DNamespace
+	}
+
+	switch {
+	case dependency == DNamespace:
+		err = e.observeNamespace(ctx)
+	case dependency == DImageContentPolicy:
+		err = e.observeImageContentPolicy(ctx)
+	}
+
 	//this is for real deployment
-	err := e.observeDependencies(ctx)
 	if err != nil {
-		fmt.Printf("Failed to deploy test kube resources ", cr)
 		return managed.ExternalObservation{
 			ResourceExists: false,
 		}, nil
@@ -197,13 +232,19 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, errors.New(errNotDependency)
 	}
 
-	fmt.Printf("Creating: %+v", cr)
+	e.logger.Info("Creating: " + cr.ObjectMeta.Name)
 
 	//this is for test
 	//e.createTest()
 
 	//this is for real deployment
-	e.createDependencies(ctx)
+	switch {
+	case dependency == DNamespace:
+		e.createNamespace(ctx)
+	case dependency == DImageContentPolicy:
+		e.createImageContentPolicy(ctx)
+	}
+
 	return managed.ExternalCreation{
 		// Optionally return any details that may be required to connect to the
 		// external resource. These will be stored as the connection secret.
@@ -211,13 +252,13 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	}, nil
 }
 
-func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
+func (e *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
 	cr, ok := mg.(*v1alpha1.Dependency)
 	if !ok {
 		return managed.ExternalUpdate{}, errors.New(errNotDependency)
 	}
 
-	fmt.Printf("Updating: %+v", cr)
+	e.logger.Info("Updating: " + cr.ObjectMeta.Name)
 
 	return managed.ExternalUpdate{
 		// Optionally return any details that may be required to connect to the
@@ -226,40 +267,33 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 	}, nil
 }
 
-func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
+func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	cr, ok := mg.(*v1alpha1.Dependency)
 	if !ok {
 		return errors.New(errNotDependency)
 	}
 
-	fmt.Printf("Deleting: %+v", cr)
+	e.logger.Info("Deleting: " + cr.ObjectMeta.Name)
 
 	return nil
 }
 
 func int32Ptr(i int32) *int32 { return &i }
 
-func (e *external) observeDependencies(ctx context.Context) error {
+func (e *external) observeNamespace(ctx context.Context) error {
 
-	fmt.Printf("Observe Namespace existing for aiops %q:\n", aiopsNamespace)
+	e.logger.Info("Observe Namespace existing for aiops " + aiopsNamespace)
 
 	_, err := e.kube.CoreV1().Namespaces().Get(context.TODO(), aiopsNamespace, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-
+	dependency = DImageContentPolicy
 	return nil
 }
 
-func (e *external) observeTest() error {
-	fmt.Printf("Listing deployments in namespace %q:\n", apiv1.NamespaceDefault)
-	deploymentsClient := e.kube.AppsV1().Deployments(apiv1.NamespaceDefault)
-	_, err := deploymentsClient.Get(context.TODO(), "demo-deployment", metav1.GetOptions{})
-	return err
-}
-
-func (e *external) createDependencies(ctx context.Context) error {
-	fmt.Printf("Creating Namespace for aiops %q:\n", aiopsNamespace)
+func (e *external) createNamespace(ctx context.Context) error {
+	e.logger.Info("Creating Namespace for aiops " + aiopsNamespace)
 	namespaceSource := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: aiopsNamespace,
@@ -267,10 +301,65 @@ func (e *external) createDependencies(ctx context.Context) error {
 	}
 	namespaceobj, err := e.kube.CoreV1().Namespaces().Create(context.TODO(), namespaceSource, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
-		fmt.Errorf("create namespace error , namespace : ", aiopsNamespace)
+		e.logger.Info("create namespace error , namespace : " + aiopsNamespace)
 		return err
 	}
-	fmt.Printf("namespace created", "name", namespaceobj.Name)
+	e.logger.Info("namespace created " + namespaceobj.Name)
+	return nil
+}
+
+func (e *external) observeImageContentPolicy(ctx context.Context) error {
+
+	e.logger.Info("Observe ImageContentPolicy existing for aiops ")
+
+	openshiftClient, err := ocpoperatorv1alpha1Client.NewForConfig(e.config)
+	if err != nil {
+		e.logger.Info("Create ocp client error")
+		return err
+	}
+	_, err = openshiftClient.ImageContentSourcePolicies().Get(ctx, DImageContentPolicyName, metav1.GetOptions{})
+	if err != nil {
+		e.logger.Info("Get ImageContentPolicy error")
+		return err
+	}
+	dependency = DNamespace
+	return nil
+}
+
+func (e *external) createImageContentPolicy(ctx context.Context) error {
+
+	e.logger.Info("Create ImageContentPolicy for aiops ")
+
+	openshiftClient, err := ocpoperatorv1alpha1Client.NewForConfig(e.config)
+	if err != nil {
+		e.logger.Info("Create ocp client error")
+		return err
+	}
+
+	mirrors := []openshiftv1alpha1.RepositoryDigestMirrors{}
+	for source, mirror := range registries {
+		mirrors = append(mirrors, openshiftv1alpha1.RepositoryDigestMirrors{
+			Source:  source,
+			Mirrors: mirror,
+		})
+	}
+
+	imagepolicy := &openshiftv1alpha1.ImageContentSourcePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: DImageContentPolicyName,
+		},
+		Spec: openshiftv1alpha1.ImageContentSourcePolicySpec{
+			RepositoryDigestMirrors: mirrors,
+		},
+	}
+
+	imageContentSourcePolicy, err := openshiftClient.ImageContentSourcePolicies().Create(ctx, imagepolicy, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		e.logger.Info("Create imageContentSourcePolicy error")
+		return err
+	}
+	e.logger.Info("ImageContentSourcePolicy created : " + imageContentSourcePolicy.Name)
 	return nil
 }
 

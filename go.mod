@@ -9,6 +9,8 @@ require (
 	github.com/google/go-cmp v0.5.2
 	github.com/kr/text v0.2.0 // indirect
 	github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e // indirect
+	github.com/openshift/api v0.0.0-20200331152225-585af27e34fd // indirect
+	github.com/openshift/client-go v0.0.0-20200326155132-2a6cd50aedd0 // indirect
 	github.com/operator-framework/operator-lifecycle-manager v0.18.1 // indirect
 	github.com/pkg/errors v0.9.1
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
