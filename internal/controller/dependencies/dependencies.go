@@ -18,7 +18,6 @@ package dependencies
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,8 +38,6 @@ import (
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	openshiftv1alpha1 "github.com/openshift/api/operator/v1alpha1"
 	ocpoperatorv1alpha1Client "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1alpha1"
-	appsv1 "k8s.io/api/apps/v1"
-	apiv1 "k8s.io/api/core/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,6 +62,8 @@ const (
 	DNamespace              = "Namespace"
 	DImageContentPolicy     = "ImageContentPolicy"
 	DImageContentPolicyName = "mirror-config"
+	DImagePullSecret        = "ImagePullSecret"
+	DImagePullSecretName    = "ibm-entitlement-key"
 )
 
 // A NoOpService does nothing.
@@ -158,23 +157,29 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		panic(err)
 	}
 
+	//Get the imagepullsecret data in same namespace
+	cd.CommonCredentialSelectors.SecretRef.Name = DImagePullSecretName
+	data, err = resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
+
 	return &external{
-		logger:    logger,
-		localKube: c.kube,
-		kube:      kubeClient,
-		config:    clientConfig,
-		opClient:  opClientInstance,
+		logger:     logger,
+		localKube:  c.kube,
+		kube:       kubeClient,
+		config:     clientConfig,
+		opClient:   opClientInstance,
+		pullsecret: data,
 	}, nil
 }
 
 // An ExternalClient observes, then either creates, updates, or deletes an
 // external resource to ensure it reflects the managed resource's desired state.
 type external struct {
-	logger    logging.Logger
-	localKube client.Client
-	kube      *kubernetes.Clientset
-	config    *rest.Config
-	opClient  *operatorclient.Clientset
+	logger     logging.Logger
+	localKube  client.Client
+	kube       *kubernetes.Clientset
+	config     *rest.Config
+	opClient   *operatorclient.Clientset
+	pullsecret []byte
 }
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -200,6 +205,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		err = e.observeNamespace(ctx)
 	case dependency == DImageContentPolicy:
 		err = e.observeImageContentPolicy(ctx)
+	case dependency == DImagePullSecret:
+		err = e.observeImagePullSecret(ctx)
 	}
 
 	//this is for real deployment
@@ -243,6 +250,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.createNamespace(ctx)
 	case dependency == DImageContentPolicy:
 		e.createImageContentPolicy(ctx)
+	case dependency == DImagePullSecret:
+		e.createImagePullSecret(ctx)
 	}
 
 	return managed.ExternalCreation{
@@ -322,7 +331,7 @@ func (e *external) observeImageContentPolicy(ctx context.Context) error {
 		e.logger.Info("Get ImageContentPolicy error")
 		return err
 	}
-	dependency = DNamespace
+	dependency = DImagePullSecret
 	return nil
 }
 
@@ -363,51 +372,35 @@ func (e *external) createImageContentPolicy(ctx context.Context) error {
 	return nil
 }
 
-func (e *external) createTest() error {
-	deploymentsClient := e.kube.AppsV1().Deployments(apiv1.NamespaceDefault)
+func (e *external) observeImagePullSecret(ctx context.Context) error {
 
-	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "demo-deployment",
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: int32Ptr(2),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": "demo",
-				},
-			},
-			Template: apiv1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app": "demo",
-					},
-				},
-				Spec: apiv1.PodSpec{
-					Containers: []apiv1.Container{
-						{
-							Name:  "web",
-							Image: "nginx:1.12",
-							Ports: []apiv1.ContainerPort{
-								{
-									Name:          "http",
-									Protocol:      apiv1.ProtocolTCP,
-									ContainerPort: 80,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	// Create Deployment
-	fmt.Println("Creating deployment...")
-	result, err := deploymentsClient.Create(context.TODO(), deployment, metav1.CreateOptions{})
+	e.logger.Info("Observe ImagePullSecret existing for aiops ")
+
+	_, err := e.kube.CoreV1().Secrets(aiopsNamespace).Get(ctx, DImagePullSecretName, metav1.GetOptions{})
 	if err != nil {
-		panic(err)
+		return err
 	}
-	fmt.Printf("Created deployment %q.\n", result.GetObjectMeta().GetName())
-	return err
+	dependency = DNamespace
+	return nil
+}
+
+func (e *external) createImagePullSecret(ctx context.Context) error {
+	e.logger.Info("Creating ImagePullSecret for aiops ")
+	secretSource := corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DImagePullSecretName,
+			Namespace: aiopsNamespace,
+		},
+		Data: map[string][]byte{
+			".dockerconfigjson": e.pullsecret,
+		},
+	}
+	secretobj, err := e.kube.CoreV1().Secrets(aiopsNamespace).Create(context.TODO(), &secretSource, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		e.logger.Info("create namespace error , namespace : " + aiopsNamespace)
+		return err
+	}
+	e.logger.Info("imagePullSecret created " + secretobj.Name)
+	return nil
 }
 
