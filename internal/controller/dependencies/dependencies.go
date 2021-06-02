@@ -38,6 +38,7 @@ import (
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	openshiftv1alpha1 "github.com/openshift/api/operator/v1alpha1"
 	ocpoperatorv1alpha1Client "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1alpha1"
+	operatorv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -64,6 +65,12 @@ const (
 	DImageContentPolicyName = "mirror-config"
 	DImagePullSecret        = "ImagePullSecret"
 	DImagePullSecretName    = "ibm-entitlement-key"
+	DStrimzOperator         = "StrimzOperator"
+	DStrimzOperatorName     = "strimzi-kafka-operator"
+	DStrimzOperatorNS       = "openshift-operators"
+	DServerlessOperator     = "ServerlessOperator"
+	DKnativeServingInstance = "KnativeServingInstance"
+	DKnativeEveningInstance = "KnativeEveningInstance"
 )
 
 // A NoOpService does nothing.
@@ -207,6 +214,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		err = e.observeImageContentPolicy(ctx)
 	case dependency == DImagePullSecret:
 		err = e.observeImagePullSecret(ctx)
+	case dependency == DStrimzOperator:
+		err = e.observeStrimzOperator(ctx)
 	}
 
 	//this is for real deployment
@@ -252,6 +261,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.createImageContentPolicy(ctx)
 	case dependency == DImagePullSecret:
 		e.createImagePullSecret(ctx)
+	case dependency == DStrimzOperator:
+		e.createStrimzOperator(ctx)
+
 	}
 
 	return managed.ExternalCreation{
@@ -380,7 +392,7 @@ func (e *external) observeImagePullSecret(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	dependency = DNamespace
+	dependency = DStrimzOperator 
 	return nil
 }
 
@@ -401,6 +413,52 @@ func (e *external) createImagePullSecret(ctx context.Context) error {
 		return err
 	}
 	e.logger.Info("imagePullSecret created " + secretobj.Name)
+	return nil
+}
+
+func (e *external) observeStrimzOperator(ctx context.Context) error {
+
+	e.logger.Info("Observe StrimzOperator existing for aiops ")
+
+	opaiops, err := e.opClient.OperatorsV1alpha1().
+		Subscriptions(DStrimzOperatorNS).
+		Get(ctx, DStrimzOperatorName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if !(opaiops.Status.State == "AtLatestKnown") {
+		//Return reconcile waiting for StrimzOperator ready
+		e.logger.Info("Waiting for strimzi-kafka-operator operator AtLatestKnown")
+		dependency = DStrimzOperator
+		return nil
+	}
+	dependency = DNamespace
+	return nil
+}
+
+func (e *external) createStrimzOperator(ctx context.Context) error {
+	e.logger.Info("Creating StrimzOperator for aiops ")
+	subscription := &operatorv1alpha1.Subscription{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: DStrimzOperatorNS,
+			Name:      DStrimzOperatorName,
+		},
+		Spec: &operatorv1alpha1.SubscriptionSpec{
+			Channel:                "strimzi-0.19.x",
+			InstallPlanApproval:    operatorv1alpha1.ApprovalAutomatic,
+			CatalogSource:          "community-operators",
+			CatalogSourceNamespace: "openshift-marketplace",
+			Package:                "strimzi-kafka-operator",
+		},
+	}
+	opStrimzi, err := e.opClient.OperatorsV1alpha1().
+		Subscriptions("openshift-operators").
+		Create(ctx, subscription, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	e.logger.Info("StrimzOperator subscription created " + opStrimzi.Name)
 	return nil
 }
 
