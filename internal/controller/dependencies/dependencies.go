@@ -90,7 +90,7 @@ var (
 		"quay.io/opencloudio": {"hyc-cloud-private-daily-docker-local.artifactory.swg-devops.com/ibmcom"},
 		"cp.icr.io/cp/cpd":    {"hyc-cloud-private-daily-docker-local.artifactory.swg-devops.com/ibmcom"},
 	}
-	dependency = ""
+	dependency = DNamespace
 )
 
 // Setup adds a controller that reconciles Dependency managed resources.
@@ -206,33 +206,54 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	//this is for test
 	//err := e.observeTest()
 
-	err := errors.New("This is just for init ")
-
-	if dependency == "" {
-		dependency = DNamespace
-	}
-
-	switch {
-	case dependency == DNamespace:
-		err = e.observeNamespace(ctx)
-	case dependency == DImageContentPolicy:
-		err = e.observeImageContentPolicy(ctx)
-	case dependency == DImagePullSecret:
-		err = e.observeImagePullSecret(ctx)
-	case dependency == DStrimzOperator:
-		err = e.observeStrimzOperator(ctx)
-	case dependency == DServerlessOperator:
-		err = e.observeServerlessOperator(ctx)
-	case dependency == DServerlessNamespace:
-		err = e.observeServerlessNamespace(ctx)
-	}
-
-	//this is for real deployment
+	//Check aiops namespace
+	err := e.observeNamespace(ctx)
 	if err != nil {
 		return managed.ExternalObservation{
 			ResourceExists: false,
 		}, nil
 	}
+
+	//Check image content policy
+	err = e.observeImageContentPolicy(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
+	//Check image pull secret
+	err = e.observeImagePullSecret(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
+	//Check Strimz operator
+	err = e.observeStrimzOperator(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
+	//Check Serverless operator
+	err = e.observeServerlessOperator(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
+	//Check Knative installing namespace
+	err = e.observeServerlessNamespace(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
 	cr.Status.SetConditions(xpv1.Available())
 	return managed.ExternalObservation{
 		// Return false when the external resource does not exist. This lets
@@ -259,10 +280,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 
 	e.logger.Info("Creating: " + cr.ObjectMeta.Name)
 
-	//this is for test
-	//e.createTest()
-
-	//this is for real deployment
+	//Only handle unavailable resources/services/deployment
 	switch {
 	case dependency == DNamespace:
 		e.createNamespace(ctx)
