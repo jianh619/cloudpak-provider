@@ -76,6 +76,13 @@ const (
 	DKnativeServingInstance = "KnativeServingInstance"
 	DKnativeEveningInstance = "KnativeEveningInstance"
 
+	CatalogSource    = "CatalogSource"
+	OCPMarketplaceNS = "openshift-marketplace"
+
+	AIOpsSubscription     = "AIOpsSubscription"
+	OCPOperatorNS         = "openshift-operators"
+	AIOpsSubscriptionName = "ibm-aiops-orchestrator"
+
 	KNATIVE_SERVING_NAMESPACE  = "knative-serving"
 	KNATIVE_EVENTING_NAMESPACE = "knative-eventing"
 
@@ -220,12 +227,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 
 	//Check image content policy
-	err = e.observeImageContentPolicy(ctx)
-	if err != nil {
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil
-	}
+	/*
+		err = e.observeImageContentPolicy(ctx)
+		if err != nil {
+			return managed.ExternalObservation{
+				ResourceExists: false,
+			}, nil
+		}
+	*/
 
 	//Check image pull secret
 	err = e.observeImagePullSecret(ctx)
@@ -259,8 +268,32 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		}, nil
 	}
 
-	//Check Knative installing namespace
+	//Check Knative Serving instance
 	err = e.observeKnativeServingInstance(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
+	//Check Knative Eventing instance
+	err = e.observeKnativeEventingInstance(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
+	//Check Catalog resources
+	err = e.observeCatalogSources(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
+	//Check AIOPS subscription
+	err = e.observeAIOpsSubscription(ctx)
 	if err != nil {
 		return managed.ExternalObservation{
 			ResourceExists: false,
@@ -309,6 +342,12 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.createServerlessNamespace(ctx)
 	case dependency == DKnativeServingInstance:
 		e.createKnativeServingInstance(ctx)
+	case dependency == DKnativeEveningInstance:
+		e.createKnativeEventingInstance(ctx)
+	case dependency == CatalogSource:
+		e.createCatalogSources(ctx)
+	case dependency == AIOpsSubscription:
+		e.createAIOpsSubscription(ctx)
 	}
 
 	return managed.ExternalCreation{
@@ -354,7 +393,8 @@ func (e *external) observeNamespace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	dependency = DImageContentPolicy
+	//dependency = DImageContentPolicy
+	dependency = DImagePullSecret
 	return nil
 }
 
@@ -620,7 +660,7 @@ func (e *external) observeKnativeServingInstance(ctx context.Context) error {
 		e.logger.Info("KnativeServingInstance is not ready yet , Namespace: " + KNATIVE_SERVING_NAMESPACE + ", KnativeServerInstance :" + KNATIVE_SERVING_INSTANCE_NAME)
 		return nil
 	}
-	dependency = DNamespace
+	dependency = DKnativeEveningInstance
 	return nil
 }
 
@@ -664,6 +704,224 @@ func (e *external) createKnativeServingInstance(ctx context.Context) error {
 	}
 
 	e.logger.Info("Knative namespaces created :" + knservingInstance.Name)
+	return nil
+}
+
+func (e *external) observeKnativeEventingInstance(ctx context.Context) error {
+
+	e.logger.Info("Observe KnativeEventingInstance existing for aiops ")
+
+	knativeClient, err := knativeclient.NewForConfig(e.config)
+	if err != nil {
+		return nil
+	}
+	kneventingInstance, err := knativeClient.KnativeEventings(KNATIVE_EVENTING_NAMESPACE).Get(ctx, KNATIVE_EVENTING_INSTANCE_NAME, metav1.GetOptions{})
+	if err != nil {
+		e.logger.Info("Not able to list KnativeEventingInstance , Namespace: " + KNATIVE_EVENTING_NAMESPACE + ", KnativeEventingInstance :" + KNATIVE_EVENTING_INSTANCE_NAME)
+		return err
+	}
+	if !(kneventingInstance.Status.IsReady() == true) {
+		//Return reconcile waiting for  knservingInstance ready
+		e.logger.Info("KnativeEventingInstance is not ready yet , Namespace: " + KNATIVE_EVENTING_NAMESPACE + ", KnativeEventingInstance :" + KNATIVE_EVENTING_INSTANCE_NAME)
+		return nil
+	}
+	dependency = CatalogSource
+	return nil
+}
+
+func (e *external) createKnativeEventingInstance(ctx context.Context) error {
+	e.logger.Info("Creating KnativeEventingInstance ")
+
+	knativeClient, err := knativeclient.NewForConfig(e.config)
+	if err != nil {
+		return nil
+	}
+	kneventing := &knativ1alpha1.KnativeEventing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: KNATIVE_EVENTING_NAMESPACE,
+			Name:      KNATIVE_EVENTING_INSTANCE_NAME,
+			Labels:    map[string]string{"ibm-aiops-install/install": "knative-eventing"},
+		},
+	}
+
+	kneventingInstance, err := knativeClient.KnativeEventings(KNATIVE_EVENTING_NAMESPACE).
+		Create(ctx, kneventing, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+
+	e.logger.Info("Knative namespaces created :" + kneventingInstance.Name)
+	return nil
+}
+
+func (e *external) observeCatalogSources(ctx context.Context) error {
+
+	e.logger.Info("Observe all CatalogSource existing for aiops ")
+
+	//Check CatalogSources opencloud-operators
+	opcs, err := e.opClient.OperatorsV1alpha1().
+		CatalogSources(OCPMarketplaceNS).
+		Get(ctx, "opencloud-operators", metav1.GetOptions{})
+	if err != nil {
+		e.logger.Info("Not able to get CatalogSources , Namespace: " + OCPMarketplaceNS + ", name : opencloud-operators ")
+		return err
+	}
+	if !(opcs.Status.GRPCConnectionState.LastObservedState == "READY") {
+		//Return reconcile waiting for  CatalogSources opencloud-operators ready
+		e.logger.Info("CatalogSources opencloud-operators is not ready yet , Namespace: " + OCPMarketplaceNS + ", name : opencloud-operators ")
+		return nil
+	}
+
+	//Check CatalogSources ibm-operator-catalog
+	opcs, err = e.opClient.OperatorsV1alpha1().
+		CatalogSources(OCPMarketplaceNS).
+		Get(ctx, "ibm-operator-catalog", metav1.GetOptions{})
+	if err != nil {
+		e.logger.Info("Not able to get CatalogSources , Namespace: " + OCPMarketplaceNS + ", name : ibm-operator-catalog ")
+		return err
+	}
+	if !(opcs.Status.GRPCConnectionState.LastObservedState == "READY") {
+		//Return reconcile waiting for  CatalogSources ibm-operator-catalog ready
+		e.logger.Info("CatalogSources ibm-operator-catalog is not ready yet , Namespace: " + OCPMarketplaceNS + ", name : ibm-operator-catalog ")
+		return nil
+	}
+
+	//Check CatalogSources ibm-aiops-catalog
+	opcs, err = e.opClient.OperatorsV1alpha1().
+		CatalogSources(OCPMarketplaceNS).
+		Get(ctx, "ibm-aiops-catalog", metav1.GetOptions{})
+	if err != nil {
+		e.logger.Info("Not able to get CatalogSources , Namespace: " + OCPMarketplaceNS + ", name : ibm-aiops-catalog ")
+		return err
+	}
+	if !(opcs.Status.GRPCConnectionState.LastObservedState == "READY") {
+		//Return reconcile waiting for  CatalogSources ibm-aiops-catalog ready
+		e.logger.Info("CatalogSources ibm-aiops-catalog is not ready yet , Namespace: " + OCPMarketplaceNS + ", name : ibm-aiops-catalog ")
+		return nil
+	}
+
+	dependency = AIOpsSubscription
+	return nil
+}
+
+func (e *external) createCatalogSources(ctx context.Context) error {
+	e.logger.Info("Creating all CatalogSources ")
+
+	catalogSource := &operatorv1alpha1.CatalogSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: OCPMarketplaceNS,
+			Name:      "opencloud-operators",
+		},
+		Spec: operatorv1alpha1.CatalogSourceSpec{
+			DisplayName: "IBMCS Operators",
+			Image:       "docker.io/ibmcom/ibm-common-service-catalog:latest",
+			Publisher:   "IBM",
+			SourceType:  "grpc",
+		},
+	}
+
+	_, err := e.opClient.OperatorsV1alpha1().
+		CatalogSources(OCPMarketplaceNS).
+		Create(ctx, catalogSource, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+
+	catalogSource = &operatorv1alpha1.CatalogSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: OCPMarketplaceNS,
+			Name:      "ibm-operator-catalog",
+		},
+		Spec: operatorv1alpha1.CatalogSourceSpec{
+			DisplayName: "ibm-operator-catalog",
+			Image:       "docker.io/ibmcom/ibm-operator-catalog:latest",
+			Publisher:   "IBM",
+			SourceType:  "grpc",
+		},
+	}
+
+	_, err = e.opClient.OperatorsV1alpha1().
+		CatalogSources(OCPMarketplaceNS).
+		Create(ctx, catalogSource, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+
+	catalogSource = &operatorv1alpha1.CatalogSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: OCPMarketplaceNS,
+			Name:      "ibm-aiops-catalog",
+		},
+		Spec: operatorv1alpha1.CatalogSourceSpec{
+			DisplayName: "IBM AIOps Catalog",
+			Image:       "icr.io/cpopen/aiops-orchestrator-catalog:3.1-latest",
+			Publisher:   "IBM",
+			SourceType:  "grpc",
+		},
+	}
+
+	_, err = e.opClient.OperatorsV1alpha1().
+		CatalogSources(OCPMarketplaceNS).
+		Create(ctx, catalogSource, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+
+	e.logger.Info("All catalog resources are created ")
+	return nil
+}
+
+func (e *external) observeAIOpsSubscription(ctx context.Context) error {
+
+	e.logger.Info("Observe AIOPS Subscription existing for aiops ")
+
+	//Check CatalogSources opencloud-operators
+	opaiops, err := e.opClient.OperatorsV1alpha1().
+		Subscriptions(OCPOperatorNS).
+		Get(ctx, AIOpsSubscriptionName, metav1.GetOptions{})
+	if err != nil {
+		e.logger.Info("Not able to get  Subscriptions, Namespace: " + OCPOperatorNS + ", name : " + AIOpsSubscriptionName)
+		return err
+	}
+	if !(opaiops.Status.State == "AtLatestKnown") {
+		//Return reconcile waiting for  CatalogSources opencloud-operators ready
+		e.logger.Info("Subscriptions is not ready yet , Namespace: " + OCPOperatorNS + ", name : " + AIOpsSubscriptionName)
+		return nil
+	}
+
+	dependency = DNamespace
+	return nil
+}
+
+func (e *external) createAIOpsSubscription(ctx context.Context) error {
+	e.logger.Info("Creating all AIOPS subscription ")
+
+	subscription := &operatorv1alpha1.Subscription{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: OCPOperatorNS,
+			Name:      AIOpsSubscriptionName,
+		},
+		Spec: &operatorv1alpha1.SubscriptionSpec{
+			Channel:                "v3.1",
+			InstallPlanApproval:    operatorv1alpha1.ApprovalAutomatic,
+			CatalogSource:          "ibm-aiops-catalog",
+			CatalogSourceNamespace: OCPMarketplaceNS,
+			Package:                "ibm-aiops-orchestrator",
+		},
+	}
+	subscription, err := e.opClient.OperatorsV1alpha1().
+		Subscriptions(OCPOperatorNS).
+		Create(ctx, subscription, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+
+	e.logger.Info("AIOPS subscription are created ")
 	return nil
 }
 
