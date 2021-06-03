@@ -45,6 +45,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	knativ1alpha1 "knative.dev/operator/pkg/apis/operator/v1alpha1"
+	knativeclient "knative.dev/operator/pkg/client/clientset/versioned/typed/operator/v1alpha1"
 
 	operatorclient "github.com/operator-framework/operator-lifecycle-manager/pkg/api/client/clientset/versioned"
 )
@@ -76,6 +78,9 @@ const (
 
 	KNATIVE_SERVING_NAMESPACE  = "knative-serving"
 	KNATIVE_EVENTING_NAMESPACE = "knative-eventing"
+
+	KNATIVE_SERVING_INSTANCE_NAME  = "knative-serving"
+	KNATIVE_EVENTING_INSTANCE_NAME = "knative-eventing"
 )
 
 // A NoOpService does nothing.
@@ -254,6 +259,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		}, nil
 	}
 
+	//Check Knative installing namespace
+	err = e.observeKnativeServingInstance(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
 	cr.Status.SetConditions(xpv1.Available())
 	return managed.ExternalObservation{
 		// Return false when the external resource does not exist. This lets
@@ -294,6 +307,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.createServerlessOperator(ctx)
 	case dependency == DServerlessNamespace:
 		e.createServerlessNamespace(ctx)
+	case dependency == DKnativeServingInstance:
+		e.createKnativeServingInstance(ctx)
 	}
 
 	return managed.ExternalCreation{
@@ -554,7 +569,7 @@ func (e *external) observeServerlessNamespace(ctx context.Context) error {
 		return err
 	}
 
-	dependency = DNamespace
+	dependency = DKnativeServingInstance
 	return nil
 }
 
@@ -584,6 +599,71 @@ func (e *external) createServerlessNamespace(ctx context.Context) error {
 	}
 
 	e.logger.Info("Knative namespaces created ")
+	return nil
+}
+
+func (e *external) observeKnativeServingInstance(ctx context.Context) error {
+
+	e.logger.Info("Observe KnativeServingInstance existing for aiops ")
+
+	knativeClient, err := knativeclient.NewForConfig(e.config)
+	if err != nil {
+		return nil
+	}
+	knservingInstance, err := knativeClient.KnativeServings(KNATIVE_SERVING_NAMESPACE).Get(ctx, KNATIVE_SERVING_INSTANCE_NAME, metav1.GetOptions{})
+	if err != nil {
+		e.logger.Info("Not able to list KnativeServingInstance , Namespace: " + KNATIVE_SERVING_NAMESPACE + ", KnativeServerInstance :" + KNATIVE_SERVING_INSTANCE_NAME)
+		return err
+	}
+	if !(knservingInstance.Status.IsReady() == true) {
+		//Return reconcile waiting for  knservingInstance ready
+		e.logger.Info("KnativeServingInstance is not ready yet , Namespace: " + KNATIVE_SERVING_NAMESPACE + ", KnativeServerInstance :" + KNATIVE_SERVING_INSTANCE_NAME)
+		return nil
+	}
+	dependency = DNamespace
+	return nil
+}
+
+func (e *external) createKnativeServingInstance(ctx context.Context) error {
+	e.logger.Info("Creating KnativeServingInstanc ")
+
+	knativeClient, err := knativeclient.NewForConfig(e.config)
+	if err != nil {
+		return nil
+	}
+
+	selector := `
+        selector:
+          sdlc.visibility: cluster-local
+`
+	knserving := &knativ1alpha1.KnativeServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: KNATIVE_SERVING_NAMESPACE,
+			Name:      KNATIVE_SERVING_INSTANCE_NAME,
+			Labels:    map[string]string{"ibm-aiops-install/install": "knative-serving"},
+		},
+		Spec: knativ1alpha1.KnativeServingSpec{
+			CommonSpec: knativ1alpha1.CommonSpec{
+				Config: knativ1alpha1.ConfigMapData{
+					"autoscaler": map[string]string{
+						"enable-scale-to-zero": "true",
+					},
+					"domain": map[string]string{
+						"svc.cluster.local": selector,
+					},
+				},
+			},
+		},
+	}
+
+	knservingInstance, err := knativeClient.KnativeServings(KNATIVE_SERVING_NAMESPACE).Create(ctx, knserving, metav1.CreateOptions{})
+
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+
+		return err
+	}
+
+	e.logger.Info("Knative namespaces created :" + knservingInstance.Name)
 	return nil
 }
 
