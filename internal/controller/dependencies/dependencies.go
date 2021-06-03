@@ -491,6 +491,7 @@ func (e *external) createImagePullSecret(ctx context.Context) error {
 		Data: map[string][]byte{
 			".dockerconfigjson": e.pullsecret,
 		},
+		Type: "kubernetes.io/dockercfg",
 	}
 	secretobj, err := e.kube.CoreV1().Secrets(aiopsNamespace).Create(context.TODO(), &secretSource, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
