@@ -39,6 +39,8 @@ import (
 	openshiftv1alpha1 "github.com/openshift/api/operator/v1alpha1"
 	ocpoperatorv1alpha1Client "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1alpha1"
 	operatorv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
+
+	aimanagerv1alpha1 "github.ibm.com/katamari/katamari-installer/pkg/apis/orchestrator/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,6 +90,8 @@ const (
 
 	KNATIVE_SERVING_INSTANCE_NAME  = "knative-serving"
 	KNATIVE_EVENTING_INSTANCE_NAME = "knative-eventing"
+
+	AIOpsInstallationName = "ibm-aiops"
 )
 
 // A NoOpService does nothing.
@@ -926,3 +930,95 @@ func (e *external) createAIOpsSubscription(ctx context.Context) error {
 	return nil
 }
 
+func (e *external) observeAIOpsInstance(ctx context.Context) error {
+
+	e.logger.Info("Observe AIOPS Instance existing for aiops ")
+
+	options := ctrl.Options{Scheme: cloudpakscheme}
+	cloudpackClient, err := client.New(config, client.Options{Scheme: options.Scheme})
+	if err != nil {
+		e.logger.Info("create cloudpack client error ")
+	}
+	aiopsinstallation := &aimanagerv1alpha1.Installation{}
+	err = cloudpackClient.Get(ctx, types.NamespacedName{
+		Namespace: aiopsNamespace,
+		Name:      AIOpsInstallationName,
+	}, aiopsinstallation)
+
+	if err != nil {
+		e.logger.Info("Get aiopsinstallation faild")
+		return err
+	}
+	if !(aiopsinstallation.Status.Phase == "Running") {
+		//Return reconcile waiting for  AI manager ready
+		return nil
+	}
+
+	//Check pod count of Running status
+	runningPod, err := e.kube.CoreV1().Pods(aiopsNamespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "status.phase==Running",
+	})
+	if err != nil {
+		e.logger.Info("Get aiopsinstallation pods faild in  namespace : " + aiopsNamespace)
+		return nil
+	}
+
+	e.logger.Info("current running pods num is " + len(runningPod.Items))
+
+	dependency = DNamespace
+	return nil
+}
+
+func (e *external) createAIOpsInstance(ctx context.Context) error {
+	e.logger.Info("Creating all AIOPS instance ")
+
+	options := ctrl.Options{Scheme: cloudpakscheme}
+	cloudpackClient, err := client.New(config, client.Options{Scheme: options.Scheme})
+	if err != nil {
+		e.logger.Info("create cloudpack client error ")
+		return err
+	}
+
+	const isEnabled = false
+	enabled := isEnabled
+	storageClass := StorageClassName
+	nonSharedStorageClass := StorageClassName
+
+	aimanager := &aimanagerv1alpha1.Installation{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: aiopsNamespace,
+			Name:      AIOpsInstallationName,
+		},
+		Spec: aimanagerv1alpha1.InstallationSpec{
+			Size: "small",
+			License: aimanagerv1alpha1.License{
+				Accept: true,
+			},
+			StorageClass:           storageClass,
+			StorageClassLargeBlock: nonSharedStorageClass,
+			Modules: []aimanagerv1alpha1.PakModule{
+				{
+					Name:    "aiManager",
+					Enabled: &enabled,
+				},
+				{
+					Name:    "aiopsFoundation",
+					Enabled: &enabled,
+				},
+				{
+					Name:    "applicationManager",
+					Enabled: &enabled,
+				},
+			},
+		},
+	}
+
+	err = cloudpackClient.Create(ctx, aimanager)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		e.logger.Info("Create aimanager instance error ")
+		return err
+	}
+
+	e.logger.Info("AIOPS instance are created ")
+	return nil
+}
