@@ -1,0 +1,31 @@
+apiVersion: helm.crossplane.io/v1beta1
+kind: Release
+metadata:
+  name: aiops-installation
+spec:
+# rollbackLimit: 3
+  forProvider:
+    chart:
+      name: aiops 
+      repository: https://jianh619.github.io/helm-charts
+      version: 0.0.3
+#     pullSecretRef:
+#       name: museum-creds
+#       namespace: default
+    namespace: crossplane-system
+    values:
+      pakModule: true
+#    wait: true
+#   valuesFrom:
+#     - configMapKeyRef:
+#         key: values.yaml
+#         name: default-vals
+#         namespace: wordpress
+#         optional: false
+#     - secretKeyRef:
+#         key: svalues.yaml
+#         name: svals
+#         namespace: wordpress
+#         optional: false
+  providerConfigRef:
+    name: helm-provider
