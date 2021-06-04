@@ -1,42 +1,95 @@
-# provider-template
+# cloudpak-provider
 
-`provider-template` is a minimal [Crossplane](https://crossplane.io/) Provider
-that is meant to be used as a template for implementing new Providers. It comes
-with the following features that are meant to be refactored:
+`cloudpake-provider` is a [Crossplane](https://crossplane.io/) Provider 
+, which helps preparing dependencies and installing cloudpak .
 
-- A `ProviderConfig` type that only points to a credentials `Secret`.
-- A `MyType` resource type that serves as an example managed resource.
-- A managed resource controller that reconciles `MyType` objects and simply
-  prints their configuration in its `Observe` method.
 
-## Developing
+## Getting Started
 
-Run against a Kubernetes cluster:
+### Prerequisites
 
-```console
-make run
+- You need install a kubernetes cluster https://kubernetes.io/
+- You need install crossplane https://crossplane.io in above kubernetes cluster
+- You need a target openshift cluster , will install cloudpak
+
+## Play
+
+Following executing are all in cluster which installing crossplane 
+
+### Create secret storing the kubeconfig 
+
+Using the kubeconfig in this repo as example :
+
+```
+kubectl create secret generic example-provider-secret --from-file=credentials=./examples/provider/kubeconfig
 ```
 
-Build, push, and install:
+You need replace the sample kubeconfig with your target kubeconfig 
 
-```console
-make all
+### Create secret storing the imagepullsecret 
+
+You can directly use the repo one as below :
+
+```
+kubectl apply -f examples/dependency/imagePullSecret.yaml
 ```
 
-Build image:
+### Create provider config 
 
-```console
-make image
+```
+kubectl apply -f examples/provider/config.yaml
 ```
 
-Push image:
+### Create a Dependency CR to prepare dependencies in target cluster
 
-```console
-make push
+```
+kubectl apply -f examples/dependency/dependency.yaml
 ```
 
-Build binary:
+### Start the provider to watch procedure
 
-```console
-make build
 ```
+make run 
+```
+
+### Install provider-helm 
+
+Since I use helm-chart to deploy aiops intallation , so you need install provider-helm 
+
+```
+cat << EOF | oc apply -f -
+apiVersion: pkg.crossplane.io/v1alpha1
+kind: Provider
+metadata:
+  name: provider-helm
+spec:
+  package: "crossplane/provider-helm:master"
+EOF
+```
+
+And create a corresponding provider-config use the secret storing your target kubeconfig
+
+```
+cat << EOF | oc apply -f -
+apiVersion: helm.crossplane.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: helm-provider
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      name: example-provider-secret
+      namespace: crossplane-system
+      key: credentials
+EOF      
+```
+
+### Install aiops 
+
+```
+kubectl apply -f examples/aiops/installation.yaml 
+```
+
+Note: you can modify the values in yaml to customize your installation 
+
