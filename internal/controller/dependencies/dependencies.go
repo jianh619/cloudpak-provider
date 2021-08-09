@@ -41,6 +41,7 @@ import (
 	operatorv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 
 	aimanagerv1alpha1 "github.ibm.com/katamari/katamari-installer/pkg/apis/orchestrator/v1alpha1"
+	aimanagerapis "github.ibm.com/katamari/katamari-installer/pkg/apis"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,6 +52,10 @@ import (
 	knativeclient "knative.dev/operator/pkg/client/clientset/versioned/typed/operator/v1alpha1"
 
 	operatorclient "github.com/operator-framework/operator-lifecycle-manager/pkg/api/client/clientset/versioned"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/client-go/kubernetes/scheme"
 )
 
 const (
@@ -82,6 +87,7 @@ const (
 	OCPMarketplaceNS = "openshift-marketplace"
 
 	AIOpsSubscription     = "AIOpsSubscription"
+	AIOpsInstallation     = "AIOpsInstallation"
 	OCPOperatorNS         = "openshift-operators"
 	AIOpsSubscriptionName = "ibm-aiops-orchestrator"
 
@@ -189,6 +195,18 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	cd.CommonCredentialSelectors.SecretRef.Name = DImagePullSecretName
 	data, err = resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
 
+	aimanagerapis.AddToScheme(scheme.Scheme)
+	crdConfig := clientConfig
+	crdConfig.ContentConfig.GroupVersion = &schema.GroupVersion{Group: "orchestrator.aiops.ibm.com", Version: "v1alpha1"}
+    crdConfig.APIPath = "/apis"
+	crdConfig.NegotiatedSerializer = serializer.NewCodecFactory(scheme.Scheme)
+	crdConfig.UserAgent = rest.DefaultKubernetesUserAgent()
+
+	RestClient, err := rest.UnversionedRESTClientFor(crdConfig)
+	if err != nil {
+			panic(err)
+	}
+
 	return &external{
 		logger:     logger,
 		localKube:  c.kube,
@@ -196,6 +214,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		config:     clientConfig,
 		opClient:   opClientInstance,
 		pullsecret: data,
+		crClient:   RestClient,
 	}, nil
 }
 
@@ -208,6 +227,7 @@ type external struct {
 	config     *rest.Config
 	opClient   *operatorclient.Clientset
 	pullsecret []byte
+	crClient  rest.Interface
 }
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -304,6 +324,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		}, nil
 	}
 
+	//Check AIOPS installation
+	err = e.observeAIOpsInstance(ctx)
+	if err != nil {
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil
+	}
+
 	cr.Status.SetConditions(xpv1.Available())
 	return managed.ExternalObservation{
 		// Return false when the external resource does not exist. This lets
@@ -352,6 +380,8 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.createCatalogSources(ctx)
 	case dependency == AIOpsSubscription:
 		e.createAIOpsSubscription(ctx)
+	case dependency == AIOpsInstallation:
+		e.createAIOpsInstance(ctx,mg)
 	}
 
 	return managed.ExternalCreation{
@@ -898,7 +928,7 @@ func (e *external) observeAIOpsSubscription(ctx context.Context) error {
 		return nil
 	}
 
-	dependency = DNamespace
+	dependency = AIOpsInstallation
 	return nil
 }
 
@@ -934,55 +964,27 @@ func (e *external) observeAIOpsInstance(ctx context.Context) error {
 
 	e.logger.Info("Observe AIOPS Instance existing for aiops ")
 
-	options := ctrl.Options{Scheme: cloudpakscheme}
-	cloudpackClient, err := client.New(config, client.Options{Scheme: options.Scheme})
-	if err != nil {
-		e.logger.Info("create cloudpack client error ")
-	}
-	aiopsinstallation := &aimanagerv1alpha1.Installation{}
-	err = cloudpackClient.Get(ctx, types.NamespacedName{
-		Namespace: aiopsNamespace,
-		Name:      AIOpsInstallationName,
-	}, aiopsinstallation)
+	aiopsinstallation := aimanagerv1alpha1.Installation{}
+	err := e.crClient.Get().Resource("installations").Name(AIOpsInstallationName).Namespace(aiopsNamespace).Do(ctx).Into(&aiopsinstallation)
 
 	if err != nil {
-		e.logger.Info("Get aiopsinstallation faild")
+		e.logger.Info("Get aiopsinstallation faild","ERROR",err)
 		return err
 	}
-	if !(aiopsinstallation.Status.Phase == "Running") {
-		//Return reconcile waiting for  AI manager ready
-		return nil
-	}
 
-	//Check pod count of Running status
-	runningPod, err := e.kube.CoreV1().Pods(aiopsNamespace).List(ctx, metav1.ListOptions{
-		FieldSelector: "status.phase==Running",
-	})
-	if err != nil {
-		e.logger.Info("Get aiopsinstallation pods faild in  namespace : " + aiopsNamespace)
-		return nil
-	}
-
-	e.logger.Info("current running pods num is " + len(runningPod.Items))
-
-	dependency = DNamespace
 	return nil
 }
 
-func (e *external) createAIOpsInstance(ctx context.Context) error {
-	e.logger.Info("Creating all AIOPS instance ")
+func (e *external) createAIOpsInstance(ctx context.Context, mg resource.Managed) error {
+	e.logger.Info("Creating AIOPS instance ")
 
-	options := ctrl.Options{Scheme: cloudpakscheme}
-	cloudpackClient, err := client.New(config, client.Options{Scheme: options.Scheme})
-	if err != nil {
-		e.logger.Info("create cloudpack client error ")
-		return err
+	cr, ok := mg.(*v1alpha1.Dependency)
+	if !ok {
+		return errors.New(errNotDependency)
 	}
 
-	const isEnabled = false
+	const isEnabled = true
 	enabled := isEnabled
-	storageClass := StorageClassName
-	nonSharedStorageClass := StorageClassName
 
 	aimanager := &aimanagerv1alpha1.Installation{
 		ObjectMeta: metav1.ObjectMeta{
@@ -994,8 +996,9 @@ func (e *external) createAIOpsInstance(ctx context.Context) error {
 			License: aimanagerv1alpha1.License{
 				Accept: true,
 			},
-			StorageClass:           storageClass,
-			StorageClassLargeBlock: nonSharedStorageClass,
+			StorageClass: cr.Spec.ForProvider.StorageClass,
+			StorageClassLargeBlock: cr.Spec.ForProvider.StorageClass,
+			ImagePullSecret: DImagePullSecretName,
 			Modules: []aimanagerv1alpha1.PakModule{
 				{
 					Name:    "aiManager",
@@ -1013,9 +1016,10 @@ func (e *external) createAIOpsInstance(ctx context.Context) error {
 		},
 	}
 
-	err = cloudpackClient.Create(ctx, aimanager)
+	aiopsinstallation := aimanagerv1alpha1.Installation{}
+	err := e.crClient.Post().Namespace(aiopsNamespace).Resource("installations").Body(aimanager).Do(ctx).Into(&aiopsinstallation)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
-		e.logger.Info("Create aimanager instance error ")
+		e.logger.Info("Create aimanager instance error ","ERROR",err)
 		return err
 	}
 
