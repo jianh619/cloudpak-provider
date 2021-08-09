@@ -25,6 +25,7 @@ import (
 // MyTypeParameters are the configurable fields of a MyType.
 type DependencyParameters struct {
 	ConfigurableField string `json:"configurableField"`
+	StorageClass string `json:"storageClass"`
 }
 
 // MyTypeObservation are the observable fields of a MyType.
